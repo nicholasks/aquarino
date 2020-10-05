@@ -4,10 +4,14 @@
 */
 
 #include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <FastLED.h>
+#include <ThreeWire.h>
+#include <RtcDS1302.h>
+#include "dayoftheweek.c"
 
 
 #ifndef STASSID
@@ -34,7 +38,26 @@ const char* password = STAPSK;
 
 ESP8266WebServer server(80);
 const char* serverIndex = "<h2>Controlador aquario</h2>";
+HTTPClient http;
 
+// HealthCheck inteval
+const unsigned long HCK_INTERVAL = 600000; //10min
+unsigned long startMillis;
+unsigned long currentMillis;
+
+// RTC module
+ThreeWire rtcWires(12, 5, 4); // D6, D1, D2 ==> DAT, CLK, RST
+RtcDS1302<ThreeWire> Rtc(rtcWires);
+#define countof(a) (sizeof(a) / sizeof(a[0]))
+
+
+void healthCheck() {
+  http.begin("http://hc-ping.com/3b9b50af-1495-440b-9f9c-5a035796c781");
+  int httpCode = http.GET();
+  Serial.print("HealthCheck: ");
+  Serial.println(httpCode);
+  http.end();
+}
 
 void _ledOn() {
   for (int i = 0; i <= NUM_LEDS; i++) {
@@ -73,7 +96,7 @@ void turnOnLeds() {
   if (isAvailable()) {
     ledState = true;
     performAction = true;
-    const char* response = "\"success\": true, \"ledStatus\": \"on\"}";
+    const char* response = "{\"success\": true, \"ledStatus\": \"on\"}";
     server.sendHeader("Connection", "close");
     server.send(202, "application/json", response);
   }
@@ -84,7 +107,7 @@ void turnOffLeds() {
   if (isAvailable()) {
     ledState = false;
     performAction = true;
-    const char* response = "\"success\": true, \"ledStatus\": \"off\"}";
+    const char* response = "{\"success\": true, \"ledStatus\": \"off\"}";
     server.sendHeader("Connection", "close");
     server.send(202, "application/json", response);
   }
@@ -98,6 +121,7 @@ void updateLeds() {
       _ledOff();
   }
 }
+
 bool isAvailable() {
   if (performAction) {
     server.sendHeader("Connection", "close");
@@ -106,6 +130,7 @@ bool isAvailable() {
   }
   return true;
 }
+
 bool authenticate(void) {
   if (server.hasHeader(auth_header)) {
     char token[100];
@@ -125,6 +150,69 @@ bool authenticate(void) {
   return false;
 }
 
+char* getDateTimeString(const RtcDateTime& now) {
+    char datestring[20];
+
+    snprintf_P(datestring,
+            countof(datestring),
+            PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
+            now.Month(),
+            now.Day(),
+            now.Year(),
+            now.Hour(),
+            now.Minute(),
+            now.Second() );
+    return datestring;
+}
+
+char* getTimeString(const RtcDateTime& now) {
+    char datestring[20];
+
+    snprintf_P(datestring,
+            countof(datestring),
+            PSTR("%02u:%02u:%02u"),
+            now.Hour(),
+            now.Minute(),
+            now.Second() );
+    return datestring;
+}
+
+void checkCron() {
+  RtcDateTime now = Rtc.GetDateTime();
+  int DoW = getDayOfWeek(now.Day(), now.Month(), now.Year());
+  char* timeString = getTimeString(now);
+  bool isWeekend = false;
+
+  if(DoW == 0 || DoW == 1) {
+    isWeekend = true;
+  }
+
+  // Verify "Crons":
+  if(isWeekend) {
+    if(strcmp(timeString, "10:15:00") == 0) {
+      ledState = true;
+      performAction = true;
+      return;
+    }
+    if(strcmp(timeString, "18:15:00") == 0){
+      ledState = false;
+      performAction = true;
+      return;
+    }
+  } else { // Weekday
+    if(strcmp(timeString, "09:00:00") == 0) {
+      ledState = true;
+      performAction = true;
+      return;
+    }
+    if(strcmp(timeString, "17:00:00") == 0) {
+      ledState = true;
+      performAction = true;
+      return;
+    }
+  }
+
+}
 
 void setup(void) {
   Serial.begin(115200);
@@ -134,7 +222,7 @@ void setup(void) {
   WiFi.mode(WIFI_AP_STA);
   WiFi.begin(ssid, password);
   if (WiFi.waitForConnectResult() == WL_CONNECTED) {
-    Serial.print("Connected to ");
+    Serial.print("\n\nConnected to ");
     Serial.println(ssid);
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
@@ -164,12 +252,39 @@ void setup(void) {
   } else {
     Serial.println("WiFi Failed");
   }
+
+  // Initialization, LED strips.
   FastLED.addLeds<WS2812B, LED_DT, GRB>(leds, NUM_LEDS);
   FastLED.addLeds<WS2812B, LED_DT2, GRB>(leds2, NUM_LEDS);
+
+  // Initialization of the RTC module
+  Rtc.Begin();
+  RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
+  if (!Rtc.IsDateTimeValid()) {
+      Serial.println("RTC lost confidence in the DateTime!");
+      Rtc.SetDateTime(compiled);
+  }
+  if (Rtc.GetIsWriteProtected()) {
+      Serial.println("RTC was write protected, enabling writing now");
+      Rtc.SetIsWriteProtected(false);
+  }
+  if (!Rtc.GetIsRunning()) {
+      Serial.println("RTC was not actively running, starting now");
+      Rtc.SetIsRunning(true);
+  }
+
+  RtcDateTime now = Rtc.GetDateTime();
+  if (now < compiled) {
+      Serial.println("RTC is older than compile time!  (Updating DateTime)");
+      Rtc.SetDateTime(compiled);
+  }
 }
+
+
 
 void loop(void) {
   server.handleClient();
   MDNS.update();
   updateLeds();
+  checkCron();
 }
