@@ -206,7 +206,7 @@ void checkCron() {
       return;
     }
     if(strcmp(timeString, "17:00:00") == 0) {
-      ledState = true;
+      ledState = false;
       performAction = true;
       return;
     }
