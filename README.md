@@ -1,2 +1,2 @@
-# aquarino
-Controller for Aquarium using esp8266.
+# Aquarino
+Aquarium controller using esp8266.
